@@ -1,17 +1,21 @@
-import os
-from typing import Any, Dict, Optional, Union, List, Callable, Iterable
-from pathlib import Path
-import time
 import json
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, List, Optional, Union
+
 import joblib
 import numpy as np
-from datetime import datetime
-from sklearn.base import BaseEstimator
 from pydantic import Field
 
-from seanergys_modelzoo.models.common.seanergys_model import SeanergysModel, SeanergysModelTask
-from seanergys_modelzoo.logger.seanergys_logger import SeanergysLogger
 from seanergys_modelzoo.dataloader.seanergys_dataloader import SeanergysDataloader
+from seanergys_modelzoo.models.common.seanergys_model import (
+    SeanergysModel,
+    SeanergysModelTask,
+)
+from seanergys_modelzoo.models.common.seanergys_model_metadata import (
+    SeanergysModelMetadata,
+)
 
 
 class SeanergysSklearnModel(SeanergysModel):
@@ -25,16 +29,16 @@ class SeanergysSklearnModel(SeanergysModel):
     metric computation based on task type.
     """
 
-    model_class: type = Field(..., description="The scikit-learn estimator class to instantiate")
+    model_class: type = Field(
+        ..., description="The scikit-learn estimator class to instantiate"
+    )
     model_hyperparameters: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Hyperparameters forwarded to the estimator constructor"
+        description="Hyperparameters forwarded to the estimator constructor",
     )
     training_history: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Training and validation metrics history"
+        default_factory=dict, description="Training and validation metrics history"
     )
-    
 
     def model_post_init(self, __context: Any) -> None:
         """
@@ -43,7 +47,6 @@ class SeanergysSklearnModel(SeanergysModel):
         """
         super().model_post_init(__context)
         self.build_model()
-
 
     def build_model(self) -> None:
         """
@@ -66,7 +69,7 @@ class SeanergysSklearnModel(SeanergysModel):
         val_data_loader: Optional[SeanergysDataloader] = None,
         training_loss: Optional[Callable] = None,
         validation_metrics: Optional[List[Callable]] = None,
-        **kwargs
+        **kwargs,
     ) -> Dict[str, Any]:
         """
         Train the scikit-learn estimator.
@@ -92,17 +95,17 @@ class SeanergysSklearnModel(SeanergysModel):
             val_metrics_values = None
             val_time = None
 
-            supports_partial_fit = (
-                hasattr(self.estimator, "partial_fit")
-                and callable(self.estimator.partial_fit)
+            supports_partial_fit = hasattr(self.estimator, "partial_fit") and callable(
+                self.estimator.partial_fit
             )
 
             if supports_partial_fit:
                 self.logger.info(
                     f"Training on {len(train_data_loader)} batches via partial_fit "
-                    f"({len(train_data_loader.dataset)} total samples)"
+                    f"({len(train_data_loader.dataset)} total samples)"  # type: ignore[arg-type]
                 )
-                all_y_true, all_y_pred = [], []
+                all_y_true: list = []
+                all_y_pred: list = []
                 for X_batch, y_batch in train_data_loader:
                     X_np = self._to_numpy(X_batch)
                     y_np = self._to_numpy(y_batch)
@@ -128,6 +131,7 @@ class SeanergysSklearnModel(SeanergysModel):
             # Update state
             self.is_trained = True
             training_time = time.time() - start_time
+            assert self.metadata is not None
             self.metadata.set_field("last_trained", datetime.now().isoformat())
             self.metadata.set_field("training_time", training_time)
             if train_loss_value is not None:
@@ -177,7 +181,7 @@ class SeanergysSklearnModel(SeanergysModel):
         self,
         data_loader: Union[SeanergysDataloader, Iterable],
         return_proba: bool = False,
-        **kwargs
+        **kwargs,
     ) -> np.ndarray:
         """
         Make predictions on input data.
@@ -220,16 +224,16 @@ class SeanergysSklearnModel(SeanergysModel):
         except Exception as e:
             self.logger.error(f"Error during prediction: {e}")
             raise
-    
+
     def evaluate(
         self,
         data_loader: SeanergysDataloader,
-        metrics: List[Callable] = None,
-        **kwargs
+        metrics: Optional[List[Callable]] = None,
+        **kwargs,
     ) -> List:
         """
         Evaluate model performance on input data.
-        
+
         Args:
             data_loader: A SeanergysDataloader containing input data for evaluations
             metrics: List of the metrics to use to evaluate the model, each function should take as input y_true and y_pred. If None the subclasses should implement at least one by default.
@@ -247,10 +251,7 @@ class SeanergysSklearnModel(SeanergysModel):
         return metrics_results
 
     def save(
-        self,
-        path: Union[str, Path] = "./saved_model",
-        compress: int = 3,
-        **kwargs
+        self, path: Union[str, Path] = "./saved_model", compress: int = 3, **kwargs
     ) -> bool:
         """
         Persist the estimator, metadata, and supplementary info to disk.
@@ -263,11 +264,13 @@ class SeanergysSklearnModel(SeanergysModel):
             True on success, False on failure.
         """
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True)
+        estimator_path = path / self.model_name / ".joblib"
+        estimator_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
             # 1. Persist the fitted estimator
-            joblib.dump(self.estimator, f"{os.path.join(str(path), self.model_name, '.joblib')}", compress=compress)
+            joblib.dump(self.estimator, str(estimator_path), compress=compress)
             self.logger.info(f"Estimator saved to {path}")
 
             # 2. Persist metadata (base-class helper)
@@ -277,7 +280,7 @@ class SeanergysSklearnModel(SeanergysModel):
             info = {
                 "model_class_module": self.model_class.__module__,
                 "model_class_name": self.model_class.__name__,
-                "task_type": self.task_type.name,          # store enum name
+                "task_type": self.task_type.name,  # store enum name
                 "model_hyperparameters": self.model_hyperparameters,
                 "sklearn_params": self.estimator.get_params(),
             }
@@ -294,9 +297,7 @@ class SeanergysSklearnModel(SeanergysModel):
 
     @classmethod
     def load(
-        cls,
-        path: Union[str, Path] = "./saved_model",
-        **kwargs
+        cls, path: Union[str, Path] = "./saved_model", **kwargs
     ) -> "SeanergysSklearnModel":
         """
         Restore a SeanergysSklearnModel from disk.
@@ -324,6 +325,7 @@ class SeanergysSklearnModel(SeanergysModel):
 
             # 2. Re-import the estimator class dynamically
             import importlib
+
             module = importlib.import_module(info["model_class_module"])
             model_class = getattr(module, info["model_class_name"])
 
@@ -335,24 +337,34 @@ class SeanergysSklearnModel(SeanergysModel):
                 model_class=model_class,
                 task_type=task_type,
                 model_hyperparameters=info.get("model_hyperparameters", {}),
+                metadata=SeanergysModelMetadata(name=cls.__name__),
                 **kwargs,
             )
 
             # 5. Replace the unfitted estimator with the persisted one
-            instance.estimator = joblib.load(f"{os.path.join(str(path), cls.model_name, '.joblib')}")
+            model_name = getattr(cls, "model_name", cls.__name__)
+            estimator_path = path / model_name / ".joblib"
+            instance.estimator = joblib.load(str(estimator_path))
             instance.is_trained = True
 
             # 6. Restore metadata
             metadata_path = path.parent / f"{path.stem}_metadata.json"
             if metadata_path.exists():
                 with open(metadata_path, "r") as f:
-                    instance.metadata = json.load(f)
+                    instance.metadata = SeanergysModelMetadata.from_dict(json.load(f))
 
             instance.logger.info(f"Model loaded from {path}")
             return instance
 
         except Exception as e:
             raise RuntimeError(f"Error loading model: {e}") from e
+
+    def _set_metadata(self, key: str, value: Any) -> None:
+        """Update a field inside the model's metadata hyperparameters dict."""
+        if self.metadata is None:
+            return
+        self.metadata.hyperparameters[key] = value
+        self.metadata._touch()
 
     @staticmethod
     def _to_numpy(tensor: Any) -> np.ndarray:
@@ -376,7 +388,7 @@ class SeanergysSklearnModel(SeanergysModel):
         Returns:
             Tuple of (features, targets) numpy arrays.
         """
-        features_list = [] 
+        features_list = []
         targets_list = []
         for X_batch, y_batch in dataloader:
             features_list.append(self._to_numpy(X_batch))

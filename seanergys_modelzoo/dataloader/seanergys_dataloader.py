@@ -1,8 +1,15 @@
+from __future__ import annotations
+
 from typing import Any, Callable, Iterable
+
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import Sampler
 
 from seanergys_modelzoo.datasets.common.seanergys_dataset import SeanergysDataset
+from seanergys_modelzoo.models.common.seanergys_configurator import (
+    SeanergysDataloaderParams,
+)
+
 
 class SeanergysDataloader(DataLoader):
     r"""
@@ -92,26 +99,60 @@ class SeanergysDataloader(DataLoader):
                  distribution being fed to the trainer in cases with imbalanced data.
     """
 
-    def __init__(self,
-                dataset:SeanergysDataset,
-                batch_size: int | None = 1,
-                shuffle: bool | None = None,
-                sampler: Sampler | Iterable | None = None,
-                batch_sampler: Sampler[list] | Iterable[list] | None = None,
-                num_workers: int = 0,
-                collate_fn:  Callable[[list], Any] | None = None,
-                pin_memory: bool = False,
-                drop_last: bool = False,
-                timeout: float = 0,
-                worker_init_fn: Callable[[int], None] | None = None,
-                multiprocessing_context=None,
-                generator=None,
-                prefetch_factor: int | None = None,
-                persistent_workers: bool = False,
-                pin_memory_device: str = "",
-                in_order: bool = True,
-                **kwargs
-                ):
-        if not(isinstance(dataset, SeanergysDataset)):
-            raise ValueError(f"Dataset should be an instance of SeanergysDataset, found {type(dataset)} instead")
-        super().__init__(dataset, batch_size=batch_size, shuffle=shuffle, sampler=sampler, batch_sampler=batch_sampler, num_workers=num_workers, collate_fn=collate_fn, pin_memory=pin_memory, drop_last=drop_last, timeout=timeout, worker_init_fn=worker_init_fn, multiprocessing_context=multiprocessing_context, generator=generator, prefetch_factor=prefetch_factor, persistent_workers=persistent_workers, pin_memory_device=pin_memory_device, in_order=in_order, **kwargs)
+    def __init__(
+        self,
+        dataset: SeanergysDataset,
+        batch_size: int | None = 1,
+        shuffle: bool | None = None,
+        sampler: Sampler | Iterable | None = None,
+        batch_sampler: Sampler[list] | Iterable[list] | None = None,
+        num_workers: int = 0,
+        collate_fn: Callable[[list], Any] | None = None,
+        pin_memory: bool = False,
+        drop_last: bool = False,
+        timeout: float = 0,
+        worker_init_fn: Callable[[int], None] | None = None,
+        multiprocessing_context=None,
+        generator=None,
+        prefetch_factor: int | None = None,
+        persistent_workers: bool = False,
+        pin_memory_device: str = "",
+        in_order: bool = True,
+        **kwargs,
+    ):
+        if not (isinstance(dataset, SeanergysDataset)):
+            raise ValueError(
+                f"Dataset should be an instance of SeanergysDataset, found {type(dataset)} instead"
+            )
+        super().__init__(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            sampler=sampler,
+            batch_sampler=batch_sampler,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+            pin_memory=pin_memory,
+            drop_last=drop_last,
+            timeout=timeout,
+            worker_init_fn=worker_init_fn,
+            multiprocessing_context=multiprocessing_context,
+            generator=generator,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
+            pin_memory_device=pin_memory_device,
+            in_order=in_order,
+            **kwargs,
+        )
+
+    @classmethod
+    def from_config(
+        cls, dataset: SeanergysDataset, data_loader_config: SeanergysDataloaderParams
+    ) -> SeanergysDataloader:
+        """
+        Instantiate the model class from the SeanergysDataloaderConfiguration
+
+        Args:
+            :param data_loader_config: SeanergysDataloaderConfiguration to use
+        """
+        return cls(dataset=dataset, **data_loader_config.__dict__)
