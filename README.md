@@ -1,207 +1,213 @@
-# HPC Energy Management with Reinforcement Learning
+# Model zoo (April 2026)
 
-**A PPO-based energy dispatch controller for HPC clusters, integrated into the Seanergys Model Zoo.**
+The model zoo is a GitLab repository (https://gitlab.seanergys.fz-juelich.de/software/modelzoo) hosting code that implements models and Day-0 datasets, and has a CI pipeline for automatic testing. It was structured with several **requirements** in mind:
+* It should be public 
+* Enable reproducibility and versioning of models 
+* Enable reuse of datasets
+* Facilitate use of the same dataset across different models
+* Facilitate use of more datasets by one model
+* Data is not stored within the model zoo
+* Pretrained models are stored within the model zoo
+* Easy integration of new models and datasets - integrated CI pipeline that discovers new models and datasets and tests them automatically
+* Facilitate import of models and train/test configuration by Seanergys AI production tool
 
-## Overview
 
-This project investigates how reinforcement learning can be used to manage the energy sources supplying a high-performance computing (HPC) cluster. HPC workloads generate time-varying power demand, while renewable generation, electricity prices, and grid carbon intensity can also vary over time.
+## Quick start
 
-The goal is to learn an **energy dispatch policy** that balances three objectives:
-
-- **Operating cost:** reduce the cost of supplying energy to the cluster.
-- **Carbon emissions:** reduce the emissions associated with the selected energy sources.
-- **Grid power constraint:** avoid drawing more than a specified power limit from the electrical grid.
-
-The controller does **not** schedule jobs, change CPU/GPU frequencies, or directly reduce the cluster's computational power demand. Instead, it decides **how to supply that demand** using the available energy resources.
-
-## Energy system
-
-The simulated infrastructure includes:
-
-| Component | Role |
-| --- | --- |
-| HPC cluster | Time-varying electrical load, derived from HPC job power traces. |
-| Solar and wind | Variable renewable generation, used first when available. |
-| Battery energy storage | Stores surplus renewable energy and can supply power later. |
-| Fuel-powered generator | Supplies additional power at an operating cost and with associated emissions. |
-| Electrical grid | Supplies the remaining demand, subject to a maximum grid power threshold. |
-
-At each simulation step, renewable energy is allocated to the HPC load first. Surplus renewable energy automatically charges the battery, subject to its physical limits. The RL agent then decides how much of the remaining deficit to cover with the battery and generator. Any remaining load is assigned to the grid up to its configured power limit; excess demand is recorded as a **constraint violation / unmet energy**.
-
-### What the agent learns
-
-The main challenge is **when to use energy now versus when to preserve it for later**. For example, discharging the battery may reduce current electricity purchases but leave less stored energy for a later demand peak. Using the generator may help respect the grid limit but introduce fuel costs and emissions.
-
-A successful policy should learn to make these trade-offs over an episode rather than independently optimizing each time step. Whether the learned policy actually outperforms rule-based alternatives must be established experimentally.
-
-## Reinforcement learning formulation
-
-The environment is implemented as `HPCBatteryEnv` using **Gymnasium**; the controller uses **Proximal Policy Optimization (PPO)** from **Stable-Baselines3**.
-
-### Observations
-
-The agent receives a 14-dimensional observation vector containing:
-
-- Current HPC power demand and the deficit after renewable generation.
-- Battery state of charge (SOC) and remaining episode time.
-- Current electricity price signals and grid carbon intensity.
-- Time of day (sine/cosine representation).
-- Current renewable power generation.
-- Renewable energy and grid carbon-intensity values for 1-hour and 6-hour look-ahead windows.
-
-The implementation normalizes observations for PPO. The look-ahead signals are currently derived from future values in the simulation data; they therefore represent **perfect-foresight information**, not independently trained forecasts.
-
-### Actions
-
-The agent chooses **two discrete control values** every simulation step:
-
-1. **Battery discharge fraction:** 0% to 100% of the demand remaining after renewables.
-2. **Generator contribution fraction:** 0% to 100% of the demand remaining after battery discharge.
-
-Each fraction has 11 levels (0%, 10%, ..., 100%), giving **121 possible action combinations**. Actual energy delivery is constrained by the battery and generator models.
-
-Battery charging from renewable surplus is automatic; it is **not** an RL action.
-
-### Reward
-
-The step reward penalizes energy cost, carbon emissions, and violations of the grid power limit:
-
-```text
-reward = - 1.0 * step_cost_eur
-         - 0.001 * step_co2_g
-         - 50.0 * violation_kwh
-```
-
-PPO aims to maximize cumulative reward over the episode. Reward values will generally be negative because supplying the workload incurs costs and emissions; **less negative reward is better**, provided the same workload and scenario are used for comparison.
-
-## Data and simulation
-
-The agent uses the **PM100 HPC job power dataset**, accessed through Seanergys' `PM100Dataset` and `SeanergysDataloader` components. Job-level power measurements are processed into a cluster-level load trace and split into simulation episodes.
-
-Additional time-dependent inputs are produced using the project's models and data files for renewable generation, electricity prices, and grid carbon intensity.
-
-**Default configuration:**
-
-| Parameter | Default |
-| --- | --- |
-| PM100 time window | 2020-05-25 to 2020-06-25 (UTC) |
-| Episode duration | 24 hours |
-| Simulation step | 20 seconds |
-| Maximum grid power | 400 kW |
-| Battery capacity | 3,200 kWh |
-| Maximum wind generation | 400 kW |
-| Maximum solar generation | 450 kW |
-| Generator maximum power | 500 kW |
-| RL algorithm | PPO with an MLP policy |
-| Policy hidden layers | 256, 256, 128 |
-
-The battery model includes physical charging/discharging limits and degradation-related costs. The generator model accounts for operating constraints, fuel costs, and emissions.
-
-## Seanergys Model Zoo integration
-
-`RLAgentSim3HardConstraint` extends the common `SeanergysModel` interface and provides:
-
-- `get_train_config()` and `get_test_config()` to build model/dataloader configurations.
-- `train()` to train the PPO policy.
-- `predict()` to run the policy on one or more episodes.
-- `evaluate()` to summarize reward, cost, emissions, battery/generator use, SOC, and constraint violations.
-- `save()` and `load()` for model persistence.
-
-The implementation uses the existing Seanergys dataset and dataloader interfaces without requiring changes to the framework for the standard (non-dummy) data flow.
-
-### Main files
-
-```text
-test_rl.py
-seanergys_modelzoo/
-├── datasets/pm100.py
-├── dataloader/seanergys_dataloader.py
-└── models/tasks/power_consumption_manage/RL/
-    ├── rl_agent_sim3_hard_constraint.py
-    ├── utils/
-    │   ├── battery_model.py
-    │   ├── generator_model.py
-    │   ├── renewable_real.py
-    │   ├── price_model.py
-    │   └── co2.py
-    ├── csvs/
-    └── saved_models/
-```
-
-## Getting started
-
-Run commands from the repository root in a Python environment with the required dependencies installed: **PyTorch, Gymnasium, Stable-Baselines3, NumPy, pandas, PyArrow, Pydantic, requests**, and the supporting Seanergys dependencies. The included `environment.yml` provides an environment starting point but may require additional packages.
-
-### 1. Provide PM100
-
-The default local dataset path is:
-
-```text
-seanergys_modelzoo/models/tasks/power_consumption_manage/RL/csvs/job_table.parquet
-```
-
-If the file is absent, the agent can use the PM100 Parquet hosted on Zenodo. A local copy is recommended to avoid repeated remote reads:
+**Requirements:** Linux or macOS with `curl`, `git` and `make`. Everything else — `uv`,
+a supported Python (3.12–3.14), `poetry`, the virtual environment and all dependencies —
+is installed for you.
 
 ```bash
-mkdir -p seanergys_modelzoo/models/tasks/power_consumption_manage/RL/csvs
-wget -O seanergys_modelzoo/models/tasks/power_consumption_manage/RL/csvs/job_table.parquet \
-  https://zenodo.org/records/10127767/files/job_table.parquet
+git clone https://gitlab.seanergys.fz-juelich.de/software/modelzoo.git
+cd modelzoo
+make test
 ```
 
-### 2. Run a short training test
+That is the whole setup. Every `make` target that needs a working environment depends on
+`make env`, which:
 
-The entry-point script `test_rl.py` performs training, model saving, and evaluation. For the repository version in this project, set `USE_DUMMY = False` in that script to use the normal PM100 flow:
+1. runs `scripts/ensure_tools.sh` — checks `curl`/`git`/`make`, then installs **uv** and
+   **poetry** into `~/.local/bin` if they are missing, and fetches a supported Python with
+   `uv python install` when the system one is out of range (no `sudo`, nothing global);
+2. verifies `poetry.lock` is in sync with `pyproject.toml`;
+3. creates `.venv/` if absent and runs `poetry install --with dev,ci`, re-running it only
+   when `pyproject.toml` or `poetry.lock` actually changed.
+
+So `make test`, `make lint`, `make docs-ci` and friends all work on a fresh clone with no
+manual setup step.
+
+| Command | What it does |
+|---|---|
+| `make bootstrap` | Do the whole setup explicitly, without running tests |
+| `make doctor` | Report toolchain / `.venv` / fixture state, change nothing |
+| `make tools` | Ensure `uv`, Python 3.12–3.14 and `poetry` exist (installs the missing ones) |
+| `make tools-check` | Same checks, **never** installs — non-zero exit if anything is missing |
+| `make env` | Ensure `.venv/` exists and matches `poetry.lock` (dev + ci groups) |
+| `make help` | Full list of targets |
+
+**Opting out of automatic installation.** On a locked-down machine, or in a container image
+that must not fetch tools, set `MODELZOO_NO_AUTO_INSTALL=1` — the toolchain step then only
+reports what is missing and fails instead of installing:
 
 ```bash
-python test_rl.py
+MODELZOO_NO_AUTO_INSTALL=1 make test
 ```
 
-For a shorter test with explicit settings, the RL module also exposes a command-line interface:
+If the new tools are not on your `PATH` in a fresh shell, add this to `~/.bashrc`:
 
 ```bash
-python -m seanergys_modelzoo.models.tasks.power_consumption_manage.RL.rl_agent_sim3_hard_constraint \
-  --mode train \
-  --window-start 2020-05-25T00:00:00Z \
-  --window-end 2020-05-26T00:00:00Z \
-  --episode-hours 24 \
-  --max-episodes 1 \
-  --total-timesteps 5000 \
-  --n-steps 512 \
-  --batch-size 128 \
-  --save-dir saved_models/rl_agent_sim3_hard_constraint
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-The defaults include an episode-based stopping callback (`max_episodes=2`). Consequently, `total_timesteps` is an upper training target, **not necessarily the number of steps actually completed**.
+### Running the tests
 
-### 3. Inspect the results
+```bash
+make test               # unit + smoke — fast, offline, run before every push
+make test-all           # unit + smoke + integration
+make pre-push           # format-check + secrets + lint + fast tests
+make ci                 # full local mirror of the GitLab pipeline
+```
 
-Evaluation returns metrics such as:
+The integration fixtures are committed, so the offline tests need no download — and if one
+is ever missing, the test session fetches it itself before running (any discovered dataset,
+no configuration). `make sample-data` refreshes them explicitly; `MODELZOO_FIXTURES=never`
+(implied by `CI_SKIP_ZENODO=1`) forbids any network access.
 
-- Total energy cost and CO2 emissions.
-- Battery and generator energy supplied.
-- Energy associated with grid-limit violations and renewable curtailment.
-- Final battery SOC and capacity ratio.
-- Cumulative episode reward.
+The full local-development reference lives in [`docs/ci-cd.md`](docs/ci-cd.md).
 
-Saved model artifacts can include `ppo_powercap.zip`, `vecnormalize.pkl`, `model_state.json`, and model metadata. When episode-artifact logging is enabled, an additional results CSV is written in the configured output directory.
+## Repository structure
 
-## Current status and limitations
+The repository has 4 main folders: two contain classes for the dataloader and datasets, one the logger, and one contains all models.
 
-The dataset loading, training, saving, and evaluation workflow has been exercised successfully on a **single 24-hour PM100 episode**. This establishes a working integration test, **not** evidence that PPO already outperforms a conventional energy-management strategy.
+![](https://gitlab.jsc.fz-juelich.de/hedgedoc/uploads/e698553a-2e64-46a6-bf1d-c892d98bab4a.png)
 
-Important limitations of the current implementation:
+Both dataset and model folders contain a common folder with base classes.
+Models are organised by task. Under each task, we can have multiple models. Each model has its own folder, containing the model class and a subfolder with pretrained models. 
 
-- A robust assessment requires comparisons against fixed-rule/greedy baselines and evaluation on **held-out time windows**. The example test currently evaluates the same time window used for training.
-- Battery SOC is reset to 50% at the beginning of each episode; energy is not carried across daily episode boundaries.
-- Forecast features use future simulation values rather than realistic forecast errors.
-- The grid threshold limits recorded grid supply; excess demand is penalized but is **not** handled by job rescheduling or an explicit workload-shedding mechanism.
-- The current PM100 dummy-filter implementation may require a compatibility fix. The standard (`is_dummy=False`) path avoids that issue without modifying the Seanergys framework.
+![](https://)![](https://gitlab.jsc.fz-juelich.de/hedgedoc/uploads/65c3bf13-de41-4d43-b2c8-2339b524c32a.png)
 
-The next research step is to evaluate whether a trained controller can reduce operating cost and emissions **while maintaining comparable or lower grid-constraint violations** than baseline dispatch strategies.
+## Data and models
 
-## Dataset reference
+The main classes of the Model Zoo are related to datasets and models, and their interaction. They have been designed so that:
+* datasets are standalone and not aware of the models that use them
+* models are aware of the datasets they can work with - they contain a list of compatible datasets
+* the model-dataset relation is N-N
+* datasets and models are discoverable, use uniform APIs and can be tested automatically in the CI pipeline - train and test configurations are available in models for each dataset 
+* classes are easily validated - we employ Pydantic for validation. This means that object initialisation is not done in the __init__ method, but in validate_model inherited from pydantic.BaseModel
 
-**PM100 — HPC job power consumption dataset (Marconi100, CINECA).**
 
-- Data: https://zenodo.org/records/10127767
-- Related paper: https://doi.org/10.1145/3624062.3624263
+![](https://gitlab.jsc.fz-juelich.de/hedgedoc/uploads/91120393-aa67-4787-8410-b1e0776af410.png)
+
+
+### Data classes
+We use the PyTorch interface to work with data, through Dataset and Dataloader objects. We provide base classes and implement several datasets.
+
+Base classes:
+* SeanergysDataloader:
+    * Main dataloader class, extends torch.utils.data.DataLoader
+    * Should not be extended but works out-of-the-box with any Seanergys dataset, using the PyTorch-defined implementation
+* SeanergysDataset:
+    * Base abstract data class, extends torch.utils.data.Dataset and pydantic.BaseModel
+    * Should be extended by all Seanergys datasets, by implementing the \_\_len\_\_ , \_\_get_item\_\_ and validate_model  methods.
+        * \_\_get_item\_\_, inherited from torch.utils.data.Dataset, returns one record in the data, identified by an index. It is used by the Dataloader to provide access to data.
+        * the method validate_model, inherited from pydantic.BaseModel, can contain initialisation logic for the Dataset object.
+        * Lazy loading is possible by keeping a mapping between indices and data batches to be loaded in memory - it is reccomended not to use shuffle=True in the Dataloader when working with lazy loading datasets, but organise shuffling externally to the loader.
+
+* SeanergysParquetDataset:
+    * Utility class for datasets using parquet files
+    * Implements the SenergysDataset class
+    * Can be extended or used as is
+
+Dataset classes:
+* PM100Dataset 
+    * accesses Marconi 100 job data from the Zenodo repository 
+    * extends SeanergysParquetDataset
+* FDataDataset
+    * accesses Fugaku Data data from Zenodo 
+    * extends SeanergysParquetDataset
+* SCRIPTAIDataset
+    * accesses job script data from Zenodo
+    * Extends SeanergysDataset
+* DurationPredictionBull
+    * HPC job duration prediction model based on an ensemble of neural networks.
+    * Predicts job duration from job metadata and learned embeddings.
+    * Supports the FDataDataset.
+    
+Further classes are being implemented: M100 and IT4I.
+
+### Model classes
+
+The model classes follow standard ML pipelines and provides functionality for reproducibility and transparency, model saving and loading, training, testing and evaluating, retrieving default training and testing configuration, hosting pretrained models. 
+
+Base model classes:
+
+* SeanergysModel
+    * Abstract class extending pydantic.BaseModel
+    * All models must extend this class 
+    * Selected attributes:
+        * metadata - object of type SeanergysModelMetadata - function as model card including all information about the model
+        * task_type - of enum type SeanergysModelTask, can be regression or classification
+        * supported_datasets - list of dataset names that allow ModelZoo users to automatically detect compatible datasets (used for instance in the CI pipeline for integration tests)
+        * logger - SeanergysLogger object 
+    * Selected methods:
+        * validate_model - pydantic model validation. This method can also contain initialisation logic that would be included in the class constructor in an implementation not using Pydantic. 
+        * load - load model from file
+        * save - save model to file
+        * train - takes as input a SeanergysDataLoader for training, optionally also one for validation, and callables for training loss and validation metrics. It trains the model on the training data.
+        * predict - takes as input a SeanergysDataLoader and applies the model to all data included in it. 
+        * evaluate - like predict, but return values for eavluation metrics rather than the predictions themselves.
+        * get_train_config 
+            * static method
+            * returns a SeanergysModel instance with specific hyperparameters and a SenargysDataLoader instance with training data and preprocessing specifications. 
+            * it requires in input the name of the dataset to be used, and whether we need a real training specification or small dummy data is enough. 
+            * this method is used by the CI pipeline to constuct automatic tests for all compatible model-dataset combinations.
+        * get_test_config
+            * static method
+            * takes as input a model instance (to be able to access preprocessing methods), a dataset name and a flag for dummy data
+            * returns a Dataloader with the correct preprocessing settings
+* SeanergysSklearnModel
+    * Helper class for models usingsklearn models in the background
+    * Implements SeanergysModel
+    * Can be used as is or extended by models
+
+Model classes: 
+
+* MACK
+    * model that classifies performance of HPC jobs, beyond the binary memory/compute-bound classification.
+    * To be presented in CCGrid 2026. https://ccgrid2026.cdms.westernsydney.edu.au/
+* MCBound 
+    * model that classifies HPC jobs as memory/compute bound.
+    * presented in Antici, Francesco, et al. "Mcbound: An online framework to characterize and classify memory/compute-bound hpc jobs." SC24: International Conference for High Performance Computing, Networking, Storage and Analysis. IEEE, 2024. https://ieeexplore.ieee.org/abstract/document/10793161 
+* JPCP 
+    * job power consumption prediction model
+    * presented in Antici, Francesco, et al. "An online algorithm for power consumption prediction of HPC workload." Future Generation Computer Systems (2025): 108064. https://www.sciencedirect.com/science/article/pii/S0167739X25003590
+
+## Logging
+
+Logging is performed by a SeanergysLogger object:
+* extends logging.Logger
+* can log to stdout or file
+* is passed to model and dataset classes for logging. If no logger is provided in constructor, a default stdout logger is created. 
+
+## CI pipeline
+
+The CI pipeline automatically tests all code committed to the Model Zoo repository. It is triggered by every commit and merge request, and runs through several stages in sequence.
+
+First, basic sanity checks ensure the repository is well-formed and free of obvious errors. Then, code quality checks verify that the code follows consistent style conventions. Finally, three levels of tests are executed:
+
+- Unit tests verify individual components and base class methods in isolation.
+- Smoke tests check that all models and datasets can be discovered and correctly instantiated. This is where Pydantic validation runs, and where automatic discovery of new classes happens — any newly added model or dataset is picked up without changes to the pipeline.
+- Integration tests verify that full training and testing pipelines work end-to-end using dummy data, for every compatible model–dataset combination.
+
+Tests are parametrised to cover all registered models and all *compatible model–dataset pairs* automatically. Specifically, models are discovered automatically by parsing the model directories. Subsequently, for each model, the list of compatible datasets and train/test configurations is retrieved and their integration tested using dummy versions of the datasets. 
+
+After the tests, coverage from every layer is combined into a single report, the build stage produces the installable wheel, and a final stage verifies the distributed wheel imports cleanly.
+
+This means that contributing a new model or dataset is enough to have it tested — the pipeline discovers and tests it without any manual configuration.
+
+A complete, always-current reference of **every pipeline job, its trigger rule, its pass/fail behaviour, and the full model×dataset capability matrix** is maintained in [`docs/ci-cd.md`](docs/ci-cd.md). That document is auto-generated from the pipeline definition and the code, so it never drifts; to propose a change to any CI rule or gate, open an issue using the *CI Change Request* template.
+
+New to the pipeline? Start with the basic-language [`CI/CD tutorials`](docs/tutorials/README.md), which explain the stages, tests, important files, automatic discovery, and documentation generator step by step.
+
+The CI pipeline is still under development, and additional test coverage is planned.

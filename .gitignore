@@ -3,3 +3,47 @@ modelzoo-main.zip
 old
 old/
 seanergys_modelzoo/models/tasks/power_consumption_manage/RL/csvs/job_table.parquet
+local_data
+saved_models/*
+.venv
+venv
+.env
+.vscode
+.claude
+.claude/*
+CLAUDE.md
+.vscode/*
+
+DS_Store
+.DS_Store
+
+# Generated build / test artifacts (regenerated on every run, never committed)
+coverage/
+coverage-data/
+.coverage
+.coverage.*
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+__pycache__
+**/__pycache__/
+.claude
+t.py
+seanergys_modelzoo/models/tasks/application_characterization
+
+D5_4_Definition_and_first_release_of_Verification_Suite.pdf
+# Internal design docs / ADRs — kept local, not pushed to GitLab
+design/
+mohsen.note.txt
+
+# Toolchain detection cache written by scripts/ensure_tools.sh
+.make
+.make/
+
+# uv lockfile — this project pins with poetry.lock; uv is only used to install tools
+uv.lock
+seanergys_modelzoo/models/tasks/power_consumption_prediction/jpcp/2026-09-15 15:41:22,477 - Senergys logs

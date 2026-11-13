@@ -1,0 +1,377 @@
+# CI/CD policy rationale — the "why" behind each pipeline rule and gate.
+#
+# The pipeline STRUCTURE (jobs, triggers, allow_failure) is the source of truth in
+# .gitlab-ci.yml and is auto-extracted into docs/ci-cd.md. This file supplies the
+# engineering RATIONALE that cannot be introspected from YAML. When you change a
+# job's behaviour in .gitlab-ci.yml, update its rationale here, then run
+# `make docs-ci` (or let docs:autogen do it on the default branch).
+#
+# A colleague requesting a change should edit the relevant entry here and open a
+# CI Change Request issue.
+
+# ---------------------------------------------------------------------------
+# Trigger anchors — when each job runs (rules:changes granularity is job-level).
+# ---------------------------------------------------------------------------
+rules:
+  always:
+    description: "Runs on every pipeline (cheap checks < 10s, no change filter)."
+  rules_code:
+    description: "Any source, test, script, CI, or dependency change."
+  rules_unit:
+    description: "Source, tests/unit/**, conftest, or dependency change."
+  rules_smoke:
+    description: "Source, tests/smoke/**, conftest, or dependency change."
+  rules_integration:
+    description: "Source, tests/integration/**, conftest, create_sample_data.py, or deps."
+  rules_deps:
+    description: "Only pyproject.toml / poetry.lock / .gitlab-ci.yml changed."
+  rules_wheel:
+    description: "Source or pyproject.toml changed (packaging-relevant)."
+  rules_zenodo:
+    description: "Default branch, or a change under seanergys_modelzoo/datasets/**, tests/integration/**, or conftest."
+  default-branch:
+    description: "Runs only on the default branch (post-merge)."
+  merge-request:
+    description: "Runs on branches / merge requests (excluded on the default branch)."
+  custom:
+    description: "Job-specific rule; see .gitlab-ci.yml for the exact condition."
+
+# ---------------------------------------------------------------------------
+# Per-job rationale — why it blocks or is allowed to fail.
+# ---------------------------------------------------------------------------
+jobs:
+  sanity:python-syntax:
+    rationale: "Broken syntax must never enter the pipeline; a cheap hard gate."
+  sanity:check-structure:
+    rationale: "Guards the repo layout that every later job and import assumes."
+  sanity:check-secrets:
+    rationale: "Warn-only: the regex scan can false-positive; a human triages hits."
+  validate:yaml-json:
+    rationale: "Invalid YAML/JSON (incl. this pipeline) would break CI itself — hard gate."
+  lint:python:
+    rationale: "Style/lint issues are quality signals, not correctness; non-blocking."
+  lint:format:
+    rationale: "Formatting drift shouldn't block merges; run `make format` to fix."
+  lint:mypy:
+    rationale: "Type coverage is incomplete; surfaced as a warning, not a gate."
+  test:unit:
+    rationale: "Component correctness is a hard gate — the fastest signal of breakage."
+  test:smoke-models:
+    rationale: "Model discovery/instantiation must hold or nothing downstream works."
+  test:smoke-data:
+    rationale: "Dataset contract + fixtures must load; hard gate (runs without Zenodo)."
+  test:integration:
+    rationale: "End-to-end model×dataset pipeline must pass; the core correctness gate."
+  test:zenodo:
+    rationale: "The only job that reaches Zenodo: downloads a small is_dummy subset (memory-safe capped read — FDataDataset.max_rows via pyarrow.iter_batches over an fsspec HTTP range-request stream, ~136 MB not the ~2 GB whole row group) and runs train→predict→save/load. Warn-only because Zenodo is an external service — downtime must not block merges; a failure is a visible connectivity/regression signal. Flip allow_failure to false to make it a hard gate."
+  test:audit:
+    rationale: "Dependency CVEs are informational and often unfixable immediately; warn-only."
+  coverage:report:
+    rationale: "Combines per-job coverage into one report; fails only on tooling error."
+  docs:check:
+    rationale: "Warns on merge requests when docs/ci-cd.md is stale; not blocking."
+  docs:autogen:
+    rationale: "Regenerates + commits docs on the default branch; warn-only so a token or push hiccup never breaks main."
+  build:wheel:
+    rationale: "A non-buildable package is a release blocker — hard gate."
+  test:wheel:
+    rationale: "The distributed wheel must import cleanly for consumers — hard gate."
+
+# ---------------------------------------------------------------------------
+# NO xfail. Removed deliberately — decision of 2026-09-13.
+#
+# integration_xfail / model_xfail / config_load_xfail used to mark known-broken
+# (model, dataset) pairs and models as expected failures, so the pipeline stayed
+# green while shipped code was broken. That is exactly the signal this project
+# must not send: a broken model is a broken model, and CI reports it as one.
+#
+# A failing test is now simply a FAILING TEST. Nothing in the test layer marks,
+# skips or tolerates it.
+#
+# The engineering facts those lists carried are not lost — every one of them is
+# registered below under `core_change_requests`, with the owner, the evidence and
+# a machine-checkable condition that FAILS the suite when the fix lands and the
+# entry must be deleted:
+#
+#   MACK-f-data, MCBound-f-data   -> CR-5  (output_features=['mem_compute_bound'],
+#                                           no F-DATA file publishes that column)
+#   JPCP-pm100                    -> CR-6  (input_features name columns the model's
+#                                           own preprocessing creates)
+#   RUAD (cannot be constructed)  -> CR-4  (build_model() builds an M100Dataset
+#                                           inside the model validator)
+#
+# Do not reintroduce an xfail list. If a failure is genuinely owned by someone
+# else, record it in core_change_requests and let the test stay red until they
+# land the fix.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Ignored dependency vulnerabilities (test:audit / pip-audit).
+# Each entry is "<VULN_ID>: <reason>". Listed advisories are passed to pip-audit
+# via --ignore-vuln so the audit stays green for CVEs we cannot act on yet (no
+# fixed release upstream). REMOVE an entry as soon as a patched version exists so
+# the audit flags the upgrade. Everything not listed here is still reported.
+# ---------------------------------------------------------------------------
+audit_ignore:
+  CVE-2025-3000: "torch 2.12.0 — no fixed version published by PyTorch yet (pip-audit 'Fix Versions' column is empty). Revisit when a patched torch releases; do not pin to a nonexistent fix."
+  PYSEC-2026-3447: "setuptools 81.0.0 — fixed in setuptools 83.0.0, but torch 2.12.0 requires setuptools <82. Revisit when PyTorch allows setuptools >=83."
+
+# ---------------------------------------------------------------------------
+# Implicit test skips that are NOT literal pytest.skip() calls (so the AST scan
+# can't see them) — e.g. a parametrize list that empties out. Surfaced in the
+# skip-inventory table alongside the auto-scanned skips.
+#
+# Empty on purpose. The previous entry claimed that under CI_SKIP_ZENODO=1
+# _collect_dataset_configs_from_models() returned {} because building a model's
+# train config instantiates datasets that connect to Zenodo at collection time.
+# That was measured and found to be FALSE: with outbound sockets blocked,
+# get_train_config() returns in ~0s for every model and never opens a socket —
+# it only assembles a model instance and a params object. The {} came from a
+# defensive early return in the test helper itself, which has been removed.
+# Those tests now parametrize for real and skip explicitly; test:zenodo runs them.
+# ---------------------------------------------------------------------------
+skip_notes: []
+
+# ---------------------------------------------------------------------------
+# Dataset scope — discovered datasets that the discovery-driven tests do NOT
+# exercise, and why.
+#
+# The modelzoo's promise is that a developer adds a model or dataset and CI
+# tests it with no test edit. tests/unit/test_discovery_contract.py enforces
+# that: a dataset that is discovered but reachable from no model's
+# get_train_config() FAILS the unit job, because it would otherwise sit in the
+# repo contributing zero executed cases while the pipeline reported green.
+#
+# This section is the ONLY escape hatch, and it is deliberately a CI-side
+# record rather than a change to the dataset: the modelzoo core is owned by the
+# dataset/model authors, so CI documents the gap and names the owner's fix
+# instead of silently working around it. Every entry must say what is missing
+# and who closes it. Delete the entry when they do — the test then requires the
+# dataset to be genuinely covered.
+# ---------------------------------------------------------------------------
+dataset_scope:
+  M100Dataset:
+    covered: no
+    missing: "DATASET_ID (inherits the empty default) and no model lists it in supported_datasets."
+    reason: "M100 is discovered but no model consumes it, so it enters no (model, dataset) configuration and no fixture can be built for it. It is also not a single-parquet source: it downloads per-record tar archives whose telemetry columns vary by plugin/metric and are aligned into a global schema only at index time, so scripts/create_sample_data.py matches neither of its two branches."
+    owner_action: "The dataset author sets DATASET_ID = \"m100\" and a model declares M100Dataset in supported_datasets with a get_train_config(dataset_name=\"m100\") entry. A fixture path also needs a create_sample_data.py branch for tar-archive sources."
+  SCRIPTAIDataset:
+    covered: no
+    missing: "DATASET_ID (inherits the empty default) and no model lists it in supported_datasets."
+    reason: "SCRIPT-AI is discovered but no model consumes it, so it contributes no test cases. It is served from GitHub rather than Zenodo, and loading it fetches one job-script file per 'jid' in features.csv, so a single sample parquet cannot represent the source either."
+    owner_action: "The dataset author sets DATASET_ID = \"script-ai\" and a model declares SCRIPTAIDataset in supported_datasets with a matching get_train_config entry."
+
+# ---------------------------------------------------------------------------
+# Core change requests — changes needed in seanergys_modelzoo/ that CI must NOT
+# make itself.
+#
+# The modelzoo core belongs to the model and dataset authors. The CI/test layer
+# never edits it: when a test cannot be written correctly because of something in
+# core, the request is recorded HERE, published in docs/ci-cd.md, and handed to
+# the owner. That keeps one rule intact — CI reports the truth about the code, it
+# does not quietly reshape the code to make itself pass.
+#
+# Each entry carries a machine-checkable `check`, so
+# tests/unit/test_core_change_requests.py can tell whether the request is still
+# open. When the owner lands the fix the check flips and the test FAILS, telling
+# whoever runs it to delete the entry. A request therefore cannot rot: it is
+# either open and documented, or done and removed.
+#
+# check kinds:
+#   dataset_missing_dataset_id  — open while <target> leaves DATASET_ID empty
+#   dataset_not_consumed        — open while no model lists <target> in supported_datasets
+#   source_contains             — open while <file> still contains <needle>
+#   source_missing              — open while <file> still LACKS <needle> (for a
+#                                 request whose fix adds something)
+# ---------------------------------------------------------------------------
+core_change_requests:
+  CR-1:
+    file: seanergys_modelzoo/datasets/m100.py
+    issue: 12
+    symbol: M100Dataset
+    owner: "M100 dataset author"
+    request: 'Set `DATASET_ID: ClassVar[str] = "m100"` on M100Dataset AND change RUAD.get_train_config / get_test_config to accept that id: they currently key on the invented literal "M100", so even after DATASET_ID is set the call raises ValueError("RUAD only supports M100"). Both halves are needed or the pair still produces no test case.'
+    why: 'SeanergysDataset declares `DATASET_ID: ClassVar[str] = ""` with the comment "Every concrete dataset must set this"; M100Dataset leaves it empty. Without it the dataset can never be paired with a model, so it enters no (model, dataset) configuration, no fixture can be built for it, and it contributes zero executed test cases.'
+    why_ci_cannot: "Setting it from the test layer would mean CI editing a dataset it does not own, and inventing an id and a model pairing on the author's behalf. CI can only report that the contract is unmet."
+    evidence: "M100Dataset.DATASET_ID == '' (measured 2026-09-13). RUAD DOES list M100Dataset in supported_datasets (ruad_model.py:67), so the pair is blocked purely by the empty id plus the case mismatch: get_train_config(dataset_name=\"M100\") at ruad_model.py:236 rejects anything else."
+    check: dataset_missing_dataset_id
+    target: M100Dataset
+
+  CR-2:
+    file: seanergys_modelzoo/datasets/script_ai.py
+    issue: 18
+    symbol: SCRIPTAIDataset
+    owner: "SCRIPT-AI dataset author"
+    request: 'Set `DATASET_ID: ClassVar[str] = "script-ai"` on SCRIPTAIDataset, and have a model list SCRIPTAIDataset in supported_datasets with a matching get_train_config entry.'
+    why: "Same unmet base-class contract as CR-1: the dataset is discovered by auto-discovery but is invisible to every discovery-driven test."
+    why_ci_cannot: "Same as CR-1 — the id and the model pairing are the author's decision, not CI's."
+    evidence: "SCRIPTAIDataset.DATASET_ID == '' and no model's supported_datasets includes it (measured 2026-09-08)."
+    check: dataset_missing_dataset_id
+    target: SCRIPTAIDataset
+
+  CR-3:
+    file: seanergys_modelzoo/datasets/f_data.py
+    issue: 17
+    symbol: FDataDataset.get_statistics_by_partition
+    owner: "F-DATA dataset author"
+    request: "Rewrite get_statistics_by_partition() against F-DATA's real published columns, or remove it. It currently reads 'partition', 'n_nodes' and 'power_consumption'; the real columns are 'nnumr'/'nnuma' (nodes), 'avgpcon' (average power) and 'duration', and raw F-DATA has no partition column at all."
+    why: "The method raises on every real F-DATA input, so it is dead code that looks like a working feature. It cannot be covered by any test built on real data."
+    why_ci_cannot: "Choosing the replacement grouping key (or deciding to drop the method) is a dataset-semantics decision owned by the author. CI must not silently rewrite a public method to make a test pass."
+    evidence: "Against tests/fixtures/sample_data/sample_fdata.parquet: get_statistics_by_partition() raises ValueError(\"'partition' column not available in dataset.\"); 'partition'/'n_nodes'/'power_consumption' are absent while 'nnumr'/'nnuma'/'avgpcon'/'duration' are present (measured 2026-09-08)."
+    check: source_contains
+    target: seanergys_modelzoo/datasets/f_data.py
+    needle: power_consumption
+
+  CR-5:
+    file: seanergys_modelzoo/models/tasks/performance_prediction/mack/mack_model.py
+    issue: 13
+    symbol: MACK.get_train_config.preprocess_fdata
+    owner: "MACK model author"
+    request: >-
+      Stop overwriting the real label column: preprocess_fdata() assigns the KMeans
+      result to df["pclass"], which is F-DATA's published memory/compute-bound label.
+      Write the derived class to its own column (e.g. kmeans_pclass) and make the value
+      a scalar class id rather than a (flops_class, mbw_class) tuple. Keep pclass as the
+      target and label-encode it to integer ids for XGBoost.
+    why: >-
+      transform_kmeans() returns list(zip(flops_labels, mbw_labels)) — a list of TUPLES.
+      Assigning that to df["pclass"] produces an object column, and torch's
+      default_collate rejects it, so the pair dies in the dataloader before a single
+      training step. It also destroys the real label, so the model can never be evaluated
+      against the published ground truth.
+    why_ci_cannot: "Which column carries the target, and whether the KMeans class replaces or complements it, is a modelling decision owned by the author. CI can only report that the pair cannot run."
+    evidence: "2026-09-13, test_full_pipeline_offline[MACK-f-data] fails at stage 'dataloader' with TypeError: default_collate: batch must contain tensors, numpy arrays, numbers, dicts or lists; found object. NOTE — two earlier points of this request have LANDED and are removed: output_features is now ['pclass'] (not 'mem_compute_bound') and preprocessing now reads df.mbwidth (not df.memory_bw). Only the overwrite remains."
+    check: source_contains
+    target: seanergys_modelzoo/models/tasks/performance_prediction/mack/mack_model.py
+    needle: 'df["pclass"] = model_fdata.transform_kmeans'
+
+  CR-7:
+    file: seanergys_modelzoo/models/tasks/performance_prediction/mcbound/mcbound_model.py
+    issue: 14
+    symbol: MCBound.get_train_config
+    owner: "MCBound model author"
+    request: "Encode the target. The config trains on output_features=['pclass'], which F-DATA publishes as a STRING ('memory-bound', ...). Add a preprocessing_functions entry that label-encodes it to integer ids, and persist the encoder in save()/load() so get_train_config and get_test_config agree on the class ids."
+    why: "A string target is rejected by torch's default_collate (it receives a pandas ArrowStringArray), so the pipeline dies in the dataloader; RandomForestClassifier would also need numeric class ids. The target column itself is correct — only the encoding is missing."
+    why_ci_cannot: "The encoding scheme and where the fitted encoder is persisted are part of the model's own contract; a test-side encoder would not survive save()/load() and would misrepresent what the shipped model does."
+    evidence: "2026-09-13, test_full_pipeline_offline[MCBound-f-data] fails at stage 'dataloader' with TypeError: default_collate: batch must contain tensors, numpy arrays, numbers, dicts or lists; found <class 'pandas.arrays.ArrowStringArray'>. sample_fdata.parquet types pclass as string (StringDtype)."
+    check: source_missing
+    target: seanergys_modelzoo/models/tasks/performance_prediction/mcbound/mcbound_model.py
+    # "preprocessing_functions=" with the equals sign: the bare word already appears
+    # in a comment in this file, so the needle must match the actual keyword argument
+    # that the fix adds to SeanergysDatasetParams.
+    needle: "preprocessing_functions="
+
+  CR-6:
+    file: seanergys_modelzoo/models/tasks/power_consumption_prediction/jpcp/jpcp_model.py
+    issue: 15
+    symbol: "PM100Dataset.validate_model (pm100.py:71-74) / JPCP.get_train_config"
+    owner: "PM100 dataset author (primary) and JPCP model author"
+    request: "Let a model declare DERIVED input features. PM100Dataset.validate_model() unions input_features + output_features into `columns` even when the author passed an explicit `columns` list, and that union becomes the parquet read projection — so a feature created by preprocessing can never be named. Preferred fix (dataset): when `columns` is given, use it as the read projection and validate input/output features against the frame AFTER preprocessing_functions have run. Alternative (model): JPCP stops naming num_nodes_req_cat / user_id_cat in input_features and selects them after preprocessing."
+    why: "JPCP's _preprocess_pm100() label-encodes num_nodes_req and user_id into *_cat columns, exactly as the framework's preprocessing hook intends, but the read projection is computed before preprocessing runs — so the dataset asks the parquet for a column that by design does not exist there yet. As written, no model can use a derived feature on PM100."
+    why_ci_cannot: "The projection rule is part of the dataset's public contract and affects every model that uses it; and which columns JPCP should feed its encoder is the model author's design decision. CI must not change either."
+    evidence: "2026-09-13: PM100Dataset(**JPCP config) raises ValidationError 'No match for FieldRef.Name(num_nodes_req_cat)'. pm100.py:71-74 does `self.columns = list(set(self.columns + self.input_features + self.output_features))`, then load_data() calls pd.read_parquet(columns=self.columns) at :118 and only afterwards applies preprocessing_functions at :126. Two tests fail: test_config_loads_offline_from_committed_fixture[JPCP-pm100] and test_full_pipeline_offline[JPCP-pm100]."
+    check: source_contains
+    target: seanergys_modelzoo/models/tasks/power_consumption_prediction/jpcp/jpcp_model.py
+    needle: user_id_cat
+
+  CR-4:
+    file: seanergys_modelzoo/models/tasks/anomaly_detection/ruad/ruad_model.py
+    issue: 11
+    symbol: RUAD.model_post_init
+    owner: "RUAD model author"
+    request: "Do not construct M100Dataset inside RUAD.model_post_init(). It is built there only to read one sample and derive _input_dim; make the input dimension an explicit field (or defer building the network to the first training batch) so constructing the model is pure. get_train_config() already returns the dataset CLASS + params, matching JPCP/MACK/MCBound — the constructor should do the same."
+    why: >-
+      Constructing the model has the side effect of loading a dataset, so merely
+      instantiating RUAD reaches Zenodo. Every discovery-driven test constructs each
+      model, so model discovery cannot be exercised without network I/O and
+      CI_SKIP_ZENODO=1 cannot prevent it. Offline the constructor raises outright, so
+      RUAD fails every lifecycle, smoke and pairing check.
+    why_ci_cannot: "The fix is a restructuring of the model's own initialisation and its data-loading contract; only the model author can decide where the dataset should be built."
+    evidence: "ruad_model.py:103 — model_post_init() constructs M100Dataset(aggregated=True, nodes=self.node_id, is_dummy=False) purely to read dataset[0] and set _input_dim (also at :304 in get_test_config). Offline this raises ValidationError('No parquet files found with given filters'), so 8 tests fail on 2026-09-13: test_model_instantiation[RUAD], test_model_get_train_config[RUAD], test_every_supported_pair_is_exercised_or_declared[RUAD] and five test_model_lifecycle[RUAD] cases. Online an earlier clean run downloaded ~303 MB into data/7541722 before finishing. Note is_dummy=False is hardcoded, so even a dummy run pulls the full data."
+    check: source_contains
+    target: seanergys_modelzoo/models/tasks/anomaly_detection/ruad/ruad_model.py
+    needle: "M100Dataset("
+
+  CR-8:
+    file: seanergys_modelzoo/datasets/common/seanergys_parquet_dataset.py
+    issue: 16
+    symbol: SeanergysParquetDataset.load_data / preprocessing_functions
+    owner: "Dataset base-class author"
+    request: >-
+      Make preprocessing_functions mean ONE thing. The base class treats each entry as a
+      (columns, fn) tuple and calls fn(df[columns]); PM100Dataset and FDataDataset treat
+      each entry as a plain callable and call fn(df). Pick one contract — the
+      DataFrame-in/DataFrame-out callable used by both concrete datasets is the more
+      capable one, since it can add derived columns — and document it on the field in
+      SeanergysDataset.
+    why: >-
+      The two forms are mutually incompatible: a (columns, fn) tuple passed to PM100 or
+      F-DATA raises when the callable is invoked with a DataFrame, and a plain callable
+      passed to the base class raises "cannot unpack non-sequence function". A model
+      author following the base class contract therefore writes preprocessing that cannot
+      run on any shipped dataset, and there is nothing in the field's description to warn
+      them.
+    why_ci_cannot: >-
+      Choosing the surviving contract changes the public API of every dataset and would
+      silently break any caller written against the other form; that is the dataset
+      authors' decision, not CI's.
+    evidence: >-
+      seanergys_parquet_dataset.py:65 `for columns, fn in self.preprocessing_functions or []`
+      versus pm100.py:126 and f_data.py:367 `for fn in self.preprocessing_functions or []`
+      (read 2026-09-13). SeanergysDataset declares the field as Optional[List[Any]] with no
+      contract stated.
+    check: source_contains
+    target: seanergys_modelzoo/datasets/common/seanergys_parquet_dataset.py
+    needle: "for columns, fn in self.preprocessing_functions"
+
+# ---------------------------------------------------------------------------
+# Name scan — where a concrete model/dataset name may appear, and where it may not.
+#
+# tests/unit/generic/test_no_hardcoded_names_repo.py scans the CI and test
+# surfaces below for the names produced by auto-discovery (model classes,
+# dataset classes, DATASET_IDs, and the derived fixture file names). A hit in
+# executable code fails the unit job.
+#
+# What counts as a hit: only CODE. Identifiers, attributes, imports and string
+# literals in Python (parsed with ast, so comments are invisible to the scan);
+# non-comment lines in YAML and the Makefile. A name in a docstring or a comment
+# is documentation — "FDataDataset -> sample_fdata.parquet" explains the rule and
+# breaks nothing when a dataset is added — so it is deliberately allowed.
+#
+# `exempt` is the only escape hatch and every entry carries its reason. Adding a
+# path here is a decision to let that file know a name; prefer making the file
+# discovery-driven instead.
+# ---------------------------------------------------------------------------
+name_scan:
+  surfaces:
+    - .gitlab-ci.yml
+    - Makefile
+    - "ci/**/*.py"
+    - "scripts/**/*.py"
+    - "tests/**/*.py"
+  exempt:
+    "tests/unit/specific/**":
+      reason: >-
+        The sanctioned home for component-specific tests. Naming the component is
+        the point: these cover offline branches of one dataset or model (parsers,
+        tar extraction, preprocessing hooks, save/load error paths) that a generic
+        contract cannot reach. Measured on 2026-09-13: removing this directory
+        drops statement coverage of seanergys_modelzoo from 82% to 61%.
+    "tests/unit/generic/test_no_hardcoded_names*.py":
+      reason: >-
+        The scanners themselves. They receive the names from discovery and must be
+        able to mention the mechanism; they hardcode nothing.
+    "ci/policy.yml":
+      reason: >-
+        The designated place for a name. dataset_scope and core_change_requests
+        are CI-owned records about specific components, kept out of test code
+        precisely so the tests stay generic.
+    "scripts/example_*.py":
+      reason: >-
+        User-facing examples, run by nothing in the pipeline. An example exists to
+        show one concrete model on one concrete dataset, so a name is its content,
+        not a defect. The one that no longer matched its model's API was archived
+        instead of exempted — see archive/README.md.
+    "archive/**":
+      reason: >-
+        Retired material, kept for reference and run by nothing. See archive/README.md.
